@@ -1,416 +1,264 @@
+// app.js - Main Application File
+import { AnimeManager } from './anime.js';
+import { EpisodeManager } from './episodes.js';
+import { VideoPlayer } from './player.js';
+
 // DOM Elements
-const searchInput = document.getElementById('search-input');
-const searchBtn = document.getElementById('search-btn');
-const trendingAnimeGrid = document.getElementById('trending-anime');
-const popularAnimeGrid = document.getElementById('popular-anime');
-const playerModal = document.getElementById('player-modal');
-const closeBtn = document.querySelector('.close-btn');
-const animePlayer = document.getElementById('anime-player');
-const playerTitle = document.getElementById('player-title');
-const playerDescription = document.getElementById('player-description');
-const episodeList = document.getElementById('episode-list');
+const elements = {
+    searchInput: document.getElementById('search-input'),
+    searchBtn: document.getElementById('search-btn'),
+    trendingAnimeGrid: document.getElementById('trending-anime'),
+    popularAnimeGrid: document.getElementById('popular-anime'),
+    playerModal: document.getElementById('player-modal'),
+    closeBtn: document.querySelector('.close-btn'),
+    animePlayer: document.getElementById('anime-player'),
+    playerTitle: document.getElementById('player-title'),
+    playerDescription: document.getElementById('player-description'),
+    episodeList: document.getElementById('episode-list'),
+    providerBadge: document.getElementById('provider-badge')
+};
 
-// Global Variables
-let currentAnimeId = null;
+// App State
+const state = {
+    currentAnime: null,
+    currentEpisode: null,
+    currentProviderIndex: 0,
+    retryCount: 0,
+    isRetrying: false
+};
 
-// Initialize the app
-document.addEventListener('DOMContentLoaded', () => {
-    fetchTrendingAnime();
-    fetchPopularAnime();
+// Initialize App
+function init() {
+    VideoPlayer.init(elements.animePlayer);
     setupEventListeners();
-    
-    // Add video player styles
-    const videoStyles = document.createElement('style');
-    videoStyles.textContent = `
-        .video-player {
-            width: 100%;
-            max-height: 70vh;
-            background: #000;
-        }
-        .loading-video {
-            color: white;
-            text-align: center;
-            padding: 20px;
-            background: #222;
-        }
-        .video-error {
-            color: #ff4444;
-            padding: 20px;
-            text-align: center;
-            background: rgba(255, 0, 0, 0.1);
-        }
-        .video-error button {
-            background: #3498db;
-            color: white;
-            border: none;
-            padding: 5px 10px;
-            margin: 5px;
-            border-radius: 3px;
-            cursor: pointer;
-        }
-    `;
-    document.head.appendChild(videoStyles);
-});
+    loadInitialData();
+    setupGlobalFunctions();
+}
 
-// Event Listeners
 function setupEventListeners() {
-    searchBtn.addEventListener('click', handleSearch);
-    searchInput.addEventListener('keypress', (e) => {
-        if (e.key === 'Enter') handleSearch();
-    });
-    closeBtn.addEventListener('click', () => {
-        playerModal.style.display = 'none';
-        const video = animePlayer.querySelector('video');
-        if (video) video.pause();
-    });
-    window.addEventListener('click', (e) => {
-        if (e.target === playerModal) {
-            playerModal.style.display = 'none';
-            const video = animePlayer.querySelector('video');
-            if (video) video.pause();
+    elements.searchBtn.addEventListener('click', handleSearch);
+    elements.searchInput.addEventListener('keypress', (e) => e.key === 'Enter' && handleSearch());
+    elements.closeBtn.addEventListener('click', closePlayer);
+    window.addEventListener('click', (e) => e.target === elements.playerModal && closePlayer());
+}
+
+function setupGlobalFunctions() {
+    window.retryLoading = retryLoading;
+    window.openExternalSite = openExternalSite;
+    window.loadEpisode = loadEpisode;
+}
+
+// Data Loading
+async function loadInitialData() {
+    try {
+        showLoader(elements.trendingAnimeGrid, 'Loading trending anime...');
+        showLoader(elements.popularAnimeGrid, 'Loading popular anime...');
+        
+        const [trending, popular] = await Promise.all([
+            AnimeManager.fetchTrending(),
+            AnimeManager.fetchPopular()
+        ]);
+        
+        displayAnime(trending, elements.trendingAnimeGrid);
+        displayAnime(popular, elements.popularAnimeGrid);
+    } catch (error) {
+        console.error('Initial data load failed:', error);
+        showError(elements.trendingAnimeGrid, 'Failed to load anime. Pull down to refresh.');
+        showError(elements.popularAnimeGrid, 'Failed to load anime. Pull down to refresh.');
+    }
+}
+
+// Player Functions
+async function openAnimePlayer(anime) {
+    resetPlayerState();
+    state.currentAnime = anime;
+    elements.playerTitle.textContent = anime.title.english || anime.title.romaji;
+    elements.playerModal.style.display = 'block';
+
+    try {
+        // First try to get anime info
+        const animeInfo = await fetchWithRetry(
+            () => AnimeManager.fetchInfo(anime.id),
+            'Failed to load anime info'
+        );
+        
+        elements.playerDescription.innerHTML = animeInfo.description?.replace(/<br>/g, '') || 'No description available.';
+        
+        // Then try to get episodes
+        const { episodes, provider } = await fetchWithRetry(
+            () => EpisodeManager.fetchEpisodes(anime.id),
+            'Failed to load episodes'
+        );
+        
+        state.currentProviderIndex = EpisodeManager.providers.findIndex(p => p.name === provider);
+        
+        if (episodes.length > 0) {
+            displayEpisodes(episodes);
+            await loadEpisode(episodes[0].id);
+        } else {
+            createPlaceholderEpisodes(animeInfo.totalEpisodes || 12, anime.id);
         }
-    });
-}
-
-// API Functions
-async function fetchTrendingAnime() {
-    try {
-        trendingAnimeGrid.innerHTML = '<div class="loading">Loading trending anime...</div>';
-        
-        const query = `
-            query {
-                Page(page: 1, perPage: 10) {
-                    media(sort: TRENDING_DESC, type: ANIME) {
-                        id
-                        title {
-                            romaji
-                            english
-                        }
-                        coverImage {
-                            large
-                        }
-                        episodes
-                    }
-                }
-            }
-        `;
-
-        const response = await fetch('https://graphql.anilist.co', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Accept': 'application/json',
-            },
-            body: JSON.stringify({ query })
-        });
-
-        const data = await response.json();
-        displayAnime(data.data.Page.media, trendingAnimeGrid);
     } catch (error) {
-        console.error('Error fetching trending anime:', error);
-        trendingAnimeGrid.innerHTML = '<div class="error">Failed to load trending anime</div>';
-    }
-}
-
-async function fetchPopularAnime() {
-    try {
-        popularAnimeGrid.innerHTML = '<div class="loading">Loading popular anime...</div>';
-        
-        const query = `
-            query {
-                Page(page: 1, perPage: 10) {
-                    media(sort: POPULARITY_DESC, type: ANIME) {
-                        id
-                        title {
-                            romaji
-                            english
-                        }
-                        coverImage {
-                            large
-                        }
-                        episodes
-                    }
-                }
-            }
-        `;
-
-        const response = await fetch('https://graphql.anilist.co', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Accept': 'application/json',
-            },
-            body: JSON.stringify({ query })
-        });
-
-        const data = await response.json();
-        displayAnime(data.data.Page.media, popularAnimeGrid);
-    } catch (error) {
-        console.error('Error fetching popular anime:', error);
-        popularAnimeGrid.innerHTML = '<div class="error">Failed to load popular anime</div>';
-    }
-}
-
-async function handleSearch() {
-    const query = searchInput.value.trim();
-    if (!query) return;
-
-    try {
-        popularAnimeGrid.innerHTML = '<div class="loading">Searching anime...</div>';
-        
-        const searchQuery = `
-            query ($search: String) {
-                Page(page: 1, perPage: 10) {
-                    media(search: $search, type: ANIME) {
-                        id
-                        title {
-                            romaji
-                            english
-                        }
-                        coverImage {
-                            large
-                        }
-                        episodes
-                    }
-                }
-            }
-        `;
-
-        const response = await fetch('https://graphql.anilist.co', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Accept': 'application/json',
-            },
-            body: JSON.stringify({
-                query: searchQuery,
-                variables: { search: query }
-            })
-        });
-
-        const data = await response.json();
-        trendingAnimeGrid.innerHTML = '';
-        popularAnimeGrid.innerHTML = '<h2>Search Results</h2>';
-        displayAnime(data.data.Page.media, popularAnimeGrid);
-    } catch (error) {
-        console.error('Error searching anime:', error);
-        popularAnimeGrid.innerHTML = '<div class="error">Failed to search anime</div>';
-    }
-}
-
-// Display Functions
-function displayAnime(animeList, container) {
-    container.innerHTML = '';
-
-    animeList.forEach(anime => {
-        const animeCard = document.createElement('div');
-        animeCard.className = 'anime-card';
-        animeCard.dataset.id = anime.id;
-
-        const title = anime.title.english || anime.title.romaji;
-        const coverImage = anime.coverImage?.large || 'assets/placeholder.jpg';
-
-        animeCard.innerHTML = `
-            <img src="${coverImage}" alt="${title}" class="anime-cover">
-            <div class="anime-info">
-                <h3 class="anime-title">${title}</h3>
-                <div class="anime-meta">
-                    <span>${anime.episodes || '?'} eps</span>
-                    <span><i class="fas fa-star"></i> 0.0</span>
+        console.error('Failed to open player:', error);
+        VideoPlayer.showError(`
+            <div class="error-content">
+                <p>Failed to load anime data</p>
+                <div class="error-actions">
+                    <button onclick="retryLoading()">
+                        <i class="fas fa-sync-alt"></i> Retry
+                    </button>
+                    <button onclick="openExternalSite()">
+                        <i class="fas fa-external-link-alt"></i> Open Website
+                    </button>
                 </div>
             </div>
-        `;
-
-        animeCard.addEventListener('click', () => {
-            openAnimePlayer(anime.id, title);
-        });
-
-        container.appendChild(animeCard);
-    });
-}
-
-async function openAnimePlayer(animeId, animeTitle) {
-    currentAnimeId = animeId;
-    playerTitle.textContent = animeTitle;
-    playerDescription.textContent = 'Loading description...';
-    episodeList.innerHTML = 'Loading episodes...';
-
-    // Show modal immediately
-    playerModal.style.display = 'block';
-
-    try {
-        // Fetch anime details
-        const detailQuery = `
-            query ($id: Int) {
-                Media(id: $id) {
-                    description
-                    episodes
-                }
-            }
-        `;
-
-        const detailResponse = await fetch('https://graphql.anilist.co', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Accept': 'application/json',
-            },
-            body: JSON.stringify({
-                query: detailQuery,
-                variables: { id: animeId }
-            })
-        });
-
-        const detailData = await detailResponse.json();
-        const description = detailData.data?.Media?.description || 'No description available.';
-        const totalEpisodes = detailData.data?.Media?.episodes || 12;
-
-        playerDescription.innerHTML = description.replace(/<br>/g, '');
-
-        // Try to fetch episodes
-        try {
-            const episodesResponse = await fetch(`https://api.consumet.org/anime/gogoanime/info/${animeId}`);
-            const episodesData = await episodesResponse.json();
-
-            if (episodesData.episodes?.length > 0) {
-                displayEpisodes(episodesData.episodes);
-                loadEpisode(episodesData.episodes[0].id);
-            } else {
-                createPlaceholderEpisodes(totalEpisodes, animeId);
-            }
-        } catch (episodesError) {
-            console.error('Error loading episodes:', episodesError);
-            createPlaceholderEpisodes(totalEpisodes, animeId);
-        }
-    } catch (detailError) {
-        console.error('Error loading anime details:', detailError);
-        playerDescription.textContent = 'Failed to load anime details. Please try again later.';
-        createPlaceholderEpisodes(12, animeId);
+        `);
     }
 }
 
-function createPlaceholderEpisodes(totalEpisodes, animeId) {
-    episodeList.innerHTML = '';
-    for (let i = 1; i <= totalEpisodes; i++) {
-        const episodeBtn = document.createElement('button');
-        episodeBtn.className = 'episode-btn';
-        episodeBtn.textContent = `Episode ${i}`;
-        episodeBtn.dataset.episodeNum = i;
-        episodeBtn.addEventListener('click', () => {
-            loadEpisode(`${animeId}-episode-${i}`);
-        });
-        episodeList.appendChild(episodeBtn);
-    }
-}
-
-function displayEpisodes(episodes) {
-    episodeList.innerHTML = '';
-    episodes.forEach(episode => {
-        const episodeBtn = document.createElement('button');
-        episodeBtn.className = 'episode-btn';
-        episodeBtn.textContent = `Ep ${episode.number}`;
-        episodeBtn.dataset.episodeId = episode.id;
-        episodeBtn.addEventListener('click', () => loadEpisode(episode.id));
-        episodeList.appendChild(episodeBtn);
-    });
-}
-
-async function loadEpisode(episodeId) {
+async function loadEpisode(episodeId, providerIndex = state.currentProviderIndex) {
+    if (state.isRetrying) return;
+    
+    state.currentEpisode = episodeId;
+    state.currentProviderIndex = providerIndex;
+    state.retryCount = 0;
+    
     try {
-        animePlayer.innerHTML = '<div class="loading-video">Loading video player...</div>';
-        
-        const streamResponse = await fetch(`https://api.consumet.org/anime/gogoanime/watch/${episodeId}`);
-        const streamData = await streamResponse.json();
-
-        if (streamData.sources?.length > 0) {
-            // Find the best playable source
-            const playableSource = streamData.sources.find(source => 
-                source.url.includes('.mp4') || source.url.includes('.m3u8'));
-            
-            if (playableSource) {
-                // Create new video element
-                animePlayer.innerHTML = `
-                    <video controls autoplay class="video-player">
-                        Your browser does not support the video tag.
-                    </video>
-                `;
-                
-                const videoElement = animePlayer.querySelector('video');
-                
-                // Handle different source types
-                if (playableSource.url.includes('.m3u8')) {
-                    // For HLS streams
-                    if (typeof Hls !== 'undefined' && Hls.isSupported()) {
-                        const hls = new Hls();
-                        hls.loadSource(playableSource.url);
-                        hls.attachMedia(videoElement);
-                        hls.on(Hls.Events.MANIFEST_PARSED, () => {
-                            videoElement.play().catch(e => {
-                                console.error('Autoplay failed:', e);
-                                videoElement.muted = true;
-                                videoElement.play();
-                            });
-                        });
-                    } else if (videoElement.canPlayType('application/vnd.apple.mpegurl')) {
-                        // For Safari/iOS
-                        videoElement.src = playableSource.url;
-                        videoElement.addEventListener('loadedmetadata', () => {
-                            videoElement.play().catch(e => {
-                                console.error('Autoplay failed:', e);
-                                videoElement.muted = true;
-                                videoElement.play();
-                            });
-                        });
-                    } else {
-                        throw new Error('HLS not supported in this browser');
-                    }
-                } else {
-                    // For direct MP4 links
-                    videoElement.src = playableSource.url;
-                    videoElement.addEventListener('loadeddata', () => {
-                        videoElement.play().catch(e => {
-                            console.error('Autoplay failed:', e);
-                            videoElement.muted = true;
-                            videoElement.play();
-                        });
-                    });
-                }
-                
-                // Highlight selected episode
-                document.querySelectorAll('.episode-btn').forEach(btn => {
-                    btn.classList.remove('active');
-                    if (btn.dataset.episodeId === episodeId || 
-                        btn.dataset.episodeNum === episodeId.split('-').pop()) {
-                        btn.classList.add('active');
-                    }
-                });
-                
-                // Error handling for video element
-                videoElement.addEventListener('error', (e) => {
-                    console.error('Video error:', e);
-                    animePlayer.innerHTML = `
-                        <div class="video-error">
-                            Error playing video. 
-                            <button onclick="loadEpisode('${episodeId}')">Retry</button>
-                            or try another episode.
-                        </div>
-                    `;
-                });
-                
-            } else {
-                throw new Error('No playable video source found');
-            }
-        } else {
-            throw new Error('No streaming sources available');
-        }
+        await attemptPlayback(episodeId, providerIndex);
     } catch (error) {
-        console.error('Error loading episode:', error);
-        animePlayer.innerHTML = `
-            <div class="video-error">
-                ${error.message}
-                <button onclick="loadEpisode('${episodeId}')">Retry</button>
-                or try another episode.
-            </div>
-        `;
+        handlePlaybackError(error, episodeId, providerIndex);
     }
 }
+
+async function attemptPlayback(episodeId, providerIndex) {
+    const provider = EpisodeManager.providers[providerIndex];
+    VideoPlayer.showLoading(`Loading from ${provider.displayName}...`);
+    elements.providerBadge.textContent = provider.displayName;
+
+    const sources = await fetchWithRetry(
+        () => EpisodeManager.fetchStreamingLinks(episodeId, providerIndex),
+        `Failed to load from ${provider.displayName}`
+    );
+
+    const bestSource = selectBestSource(sources);
+    if (!bestSource) throw new Error('No playable sources available');
+
+    await VideoPlayer.play(bestSource.url, episodeId, provider.name);
+    highlightActiveEpisode(episodeId);
+}
+
+function handlePlaybackError(error, episodeId, providerIndex) {
+    console.error(`Playback failed with ${EpisodeManager.providers[providerIndex].name}:`, error);
+    
+    // Try next provider if available
+    const nextProviderIndex = providerIndex + 1;
+    if (nextProviderIndex < EpisodeManager.providers.length) {
+        return loadEpisode(episodeId, nextProviderIndex);
+    }
+    
+    // All providers failed
+    showFinalErrorState();
+}
+
+// Helper Functions
+async function fetchWithRetry(fetchFn, errorMessage, maxRetries = 2, delay = 1000) {
+    let lastError;
+    
+    for (let i = 0; i < maxRetries; i++) {
+        try {
+            return await fetchFn();
+        } catch (error) {
+            lastError = error;
+            if (i < maxRetries - 1) {
+                await new Promise(resolve => setTimeout(resolve, delay));
+            }
+        }
+    }
+    
+    throw new Error(`${errorMessage}. ${lastError?.message || ''}`);
+}
+
+function selectBestSource(sources) {
+    return sources.find(s => s.quality === 'default') || 
+           sources.find(s => s.url.includes('.m3u8')) || 
+           sources[0];
+}
+
+function highlightActiveEpisode(episodeId) {
+    document.querySelectorAll('.episode-btn').forEach(btn => {
+        btn.classList.toggle('active', 
+            btn.dataset.episodeId === episodeId || 
+            btn.dataset.episodeNum === episodeId?.split('-')?.pop()
+        );
+    });
+}
+
+function showFinalErrorState() {
+    const providersList = EpisodeManager.providers.map((p, i) => `
+        <div class="provider-status ${i <= state.currentProviderIndex ? 'attempted' : ''}">
+            <span>${p.displayName}</span>
+            <span class="status-icon">
+                ${i < state.currentProviderIndex ? '❌' : i === state.currentProviderIndex ? '⚠️' : '➡️'}
+            </span>
+        </div>
+    `).join('');
+
+    VideoPlayer.showError(`
+        <div class="error-content">
+            <p>Couldn't load episode from any provider</p>
+            <div class="providers-tried">
+                ${providersList}
+            </div>
+            <div class="error-actions">
+                <button class="retry-btn" onclick="retryLoading()">
+                    <i class="fas fa-sync-alt"></i> Retry All
+                </button>
+                <button class="external-btn" onclick="openExternalSite()">
+                    <i class="fas fa-external-link-alt"></i> Try on Website
+                </button>
+            </div>
+        </div>
+    `);
+}
+
+function retryLoading() {
+    if (!state.currentAnime || state.isRetrying) return;
+    
+    state.isRetrying = true;
+    VideoPlayer.showLoading('Retrying...');
+    
+    setTimeout(async () => {
+        try {
+            await openAnimePlayer(state.currentAnime);
+        } finally {
+            state.isRetrying = false;
+        }
+    }, 1000);
+}
+
+function openExternalSite() {
+    if (!state.currentAnime) return;
+    
+    const provider = EpisodeManager.providers[state.currentProviderIndex];
+    const searchUrl = provider.searchUrl || `https://www.google.com/search?q=${encodeURIComponent(state.currentAnime.title.english || state.currentAnime.title.romaji + ' anime')}`;
+    window.open(searchUrl, '_blank');
+}
+
+function resetPlayerState() {
+    state.currentAnime = null;
+    state.currentEpisode = null;
+    state.currentProviderIndex = 0;
+    state.retryCount = 0;
+    elements.playerDescription.textContent = 'Loading...';
+    elements.episodeList.innerHTML = '';
+    elements.providerBadge.textContent = '';
+    VideoPlayer.clear();
+}
+
+function closePlayer() {
+    elements.playerModal.style.display = 'none';
+    VideoPlayer.clear();
+}
+
+// Initialize the app
+document.addEventListener('DOMContentLoaded', init);

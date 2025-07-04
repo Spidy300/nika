@@ -14,12 +14,12 @@ app.use('/anilist', createProxyMiddleware({
     }
 }));
 
-// Proxy for Consumet
-app.use('/consumet', createProxyMiddleware({
-    target: 'https://api.consumet.org',
+// Proxy for AnimePahe
+app.use('/animepahe', createProxyMiddleware({
+    target: 'https://api.consumet.org/anime/animepahe',
     changeOrigin: true,
     pathRewrite: {
-        '^/consumet': ''
+        '^/animepahe': ''
     }
 }));
 
